@@ -20,7 +20,7 @@ import signal
 import stat
 import time
 
-VERSION=(1,1,0)
+VERSION=(1,1,1)
 __version__='.'.join(str(v for v in VERSION))
 __author__="Jeffery Kline"
 __copyright__="Copyright 2013, Jeffery Kline"
@@ -240,38 +240,6 @@ def write_dc(dc, hot, protocol, extension, fh):
         raise NotImplementedError("dcfs is not implemented")
     else:
         raise ValueError("Unknown protocol %s" % str(protocol))
-    #     # structures useful for building/browsing the 'dcfs'.  These
-    #     # should be defaultdicts but we need python 2.4 compatibility
-    #     
-    #     # browse high levels of dcfs tree with meta_hi
-    #     meta_hi = {}
-    #     # browse middle levels of dcfs tree with meta_mid
-    #     meta_mid = {}
-    #     # this is the complete listing, a sorted list
-    #     meta_lo = {}
-    #     for keyp, seglist in dc.iteritems():
-    #         key = pickle_loads(keyp)
-    #         ext = key[EXT]
-    #         ft = key[FT]
-    #         site = key[SITE]
-    # 
-    #         try: meta_hi[ext].add(ft)
-    #         except: meta_hi[ext] = set([ft])
-    # 
-    #         try: meta_mid[(ext,ft)].add([site])
-    #         except: meta_mid[(ext, ft)] = set([site])
-    #         
-    #         v = (seglist, key[DUR], key[DIRNAME], hot[key[DIRNAME]])
-    #         k = (ext, ft, site)
-    #         try: meta_lo[k].append(v)
-    #         except: meta_lo[k] = [v]
-    #     try:
-    #         gc.disable()
-    #         pickle_dump(meta_hi, fh, -1)
-    #         pickle_dump(meta_mid, fh, -1)
-    #         pickle_dump(meta_lo, fh, -1)
-    #     finally:
-    #         gc.enable()
 
 if __name__=="__main__":
     from optparse import OptionParser
@@ -292,8 +260,9 @@ if __name__=="__main__":
            flag.""".split())
     parser.add_option("-o", "--output", default="-", help=output_help)
 
-    ipc_help = """[None] Name of file for internal process
-    communication. You probably do not need this."""
+    ipc_help = ' '.join("""[None] Name of file for internal process
+    communication. If used, then directory list must have length 1.
+    """.split())
     parser.add_option("-i", "--ipc-file", default=None, help=ipc_help)
 
     protocol_choices = ("dcfs", "ldas", "pmdc")
@@ -313,13 +282,13 @@ if __name__=="__main__":
     parser.add_option("-r", "--concurrency", type="int", default=5,
                       help=concurrency_help)
 
-    status_help = "Print some info and exit. The directory list may be empty."
+    status_help = "Print some info and exit."
     parser.add_option("-s", "--status", action="store_true", default=False,
                       help=status_help)
 
     (options, args) = parser.parse_args()
 
-    # args requires cache_file and a list of 1 or more directories.
+    # args requires cache_file and a list of 0 or more directories.
     # Branch depending on the case at hand.  If directory list has 1
     # element then run in main thread.  If directory list is longer,
     # fork one process for each entry.
@@ -327,7 +296,7 @@ if __name__=="__main__":
         parser.error("No cache provided")
         exit(1)
     
-    # we have a good namespace
+    # this is the cache namespace
     cache_file = args[0]
 
     # set up lock file for master process to protect 1 writer
@@ -338,9 +307,9 @@ if __name__=="__main__":
         open(lock_file, 'w')
         atexit.register(os.unlink, lock_file)
 
-    # the cache_file holds the 'hot' dict and some other info that is
-    # used later.  After this point, the cache_file is assumed to
-    # exist and contain two keys: "hot" and "header".
+    # cache_file holds the 'hot' dict and some other info that is used
+    # later.  After this point, the cache_file is assumed to exist and
+    # contain two keys: "hot" and "header".
     #
     # (dict) hot:
     #    key: dirpath
@@ -351,33 +320,28 @@ if __name__=="__main__":
     # The value of mtime was sampled when (approximately) the last new
     # dc key containing dirpath was added.
     try: 
-        fh = open(cache_file, 'r')
+        cache_file_fh = open(cache_file, 'r')
         initial_run = False        # has the cache_file been created?
     except: 
         initial_run = True
         header = {"initial run": initial_run, "timestamp": datetime.datetime.today()}
         pickle_dump({"hot": {}, "header": header}, open(cache_file, 'w'))
-        fh = open(cache_file, 'r')
+        cache_file_fh = open(cache_file, 'r')
 
     if options.status:
-        header= pickle_load(fh)["header"]
+        header= pickle_load(cache_file_fh)["header"]
         for kv in header.iteritems():
             print "%s: %s" % kv
         age = datetime.datetime.today() - header['timestamp']
         print "state age: %s" % str(age)
         exit(0)
 
-    # sanity check before loading 'hot' from file
-    if len(args) == 1:
-        parser.error("No directories listed")
-        exit(1)
-
-    hot = pickle_load(fh)["hot"]
-    fh.close()
+    hot = pickle_load(cache_file_fh)["hot"]
+    cache_file_fh.close()
     shelve_file = cache_file + ".shlv"
     
-    # If using interprocess communication, then dc must be
-    # empty. Otherwise, populate dc from cache.  
+    # If using interprocess communication, then dc must be empty so
+    # that only new state is saved to disk. Otherwise, populate dc from cache.
     # 
     # (shelve,dict) dc:
     #   key: pickle.dumps((dirpath, site, frametype, dur, ext)) 
@@ -385,12 +349,15 @@ if __name__=="__main__":
     if options.ipc_file is None:
         dc = shelve.open(shelve_file)
     else:
+        # check that ipc_file was called with length-1 directory list
+        if len(args)>2:
+            raise RuntimeError("Cannot use ipc-file with more than 1 directory")
         dc = {}
 
     start_scan_t = time.time()
     if len(args) == 2:
         update_dc(dc, args[1], hot)
-    else:
+    elif len(args) >2:
         parallel_update_dc(dc, args[1:], hot, options.concurrency)
     end_scan_t = time.time()
 

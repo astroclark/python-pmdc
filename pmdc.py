@@ -6,7 +6,7 @@
 # a self-contained python program that scans directories for frames
 from bisect import bisect_left
 from itertools import chain
-from os.path import abspath, exists, join as os_path_join, getmtime
+from os.path import abspath, dirname, exists, join as os_path_join, getmtime
 from sys import argv, exit, stdout
 
 import atexit
@@ -18,6 +18,7 @@ import os
 import shelve
 import signal
 import stat
+import tempfile
 import time
 
 VERSION=(1,1,1)
@@ -243,8 +244,15 @@ def write_dc(dc, hot, protocol, extension, fh):
 
 if __name__=="__main__":
     from optparse import OptionParser
-    usage = "usage: %prog <cache namespace> [<directory list>] [options]"
-    parser = OptionParser(usage=usage)
+    usage = "usage: %prog <cache namespace> [<directory list>] [options]" 
+
+    description = ' '.join("""Scan each directory in <directory list>
+    for frame files.  Write text files atomicly (this is useful for
+    large writes and other processes that need to read valid files).
+    Use a lock file to prevent more than one scan that depends on
+    <cache namespace> from occuring at the same time (this is useful
+    for cron jobs).""".split())
+    parser = OptionParser(usage=usage, description=description)
     extension_help = ' '.join("""[[]] Scan for files ending with
                                ".EXTENSION". Passing "--extension gwf"
                                is equivalent to not passing an
@@ -256,8 +264,10 @@ if __name__=="__main__":
 
     output_help = ' '.join(
         """[-] Name of file to write diskcache output to.  Use '-' for
-           stdout. Only applies if used in conjuction with -p
-           flag.""".split())
+           stdout. If a filename provided, then the write operation is
+           guaranteed to be atomic (manual manipulation of temporary
+           files is not required).  Only applies if used in conjuction
+           with -p flag.""".split())
     parser.add_option("-o", "--output", default="-", help=output_help)
 
     ipc_help = ' '.join("""[None] Name of file for internal process
@@ -361,17 +371,28 @@ if __name__=="__main__":
         parallel_update_dc(dc, args[1:], hot, options.concurrency)
     end_scan_t = time.time()
 
-    # write alternative output formats if requested to desired output
+    # write atomicly. alternative output formats if requested to
+    # desired output
     start_write_t = time.time()
     if options.protocol is not None:
         if options.output == "-":
             fh = stdout
         else:
-            fh = open(options.output, 'w')
+            fh = tempfile.NamedTemporaryFile(dir=dirname(options.output))
         extension = set(options.extension)
-        if not extension: 
+        if not extension:
             extension.add('gwf')
         write_dc(dc, hot, options.protocol, extension, fh)
+        
+        # finish the atomic write
+        if fh != stdout:
+            fh.flush()
+            os.rename(fh.name, options.output)
+            # put a dummy file on disk so NamedTemporaryFile does not
+            # complain at exit. This is for python 2.4 (delete=True
+            # came in python 2.6)
+            open(fh.name, 'w')
+            fh.close()
     end_write_t = time.time()
 
     # all done now save state.
@@ -408,4 +429,12 @@ if __name__=="__main__":
         meta["dc"] = dc
         meta["hot"] = dict(zip(dc.keys(), [hot[k] for k in dc]))
 
-    pickle_dump(meta, open(meta_f, 'w'), -1)
+    # dump to file atomicly
+    fh = tempfile.NamedTemporaryFile(dir=dirname(meta_f))
+    pickle_dump(meta, fh, -1)
+    fh.flush()
+    os.rename(fh.name, meta_f)
+    # put a dummy file on disk so NamedTemporaryFile does not complain
+    # at exit. This is for python 2.4 (delete=True came in python 2.6)
+    open(fh.name, 'w')
+    fh.close()

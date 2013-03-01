@@ -6,12 +6,14 @@
 # a self-contained python program that scans directories for frames
 from bisect import bisect_left, insort
 from itertools import chain
-from os import walk
+from os import kill, walk
 from os.path import join as os_path_join, getmtime
 from sys import argv, exit, stdout
 
 import cPickle as pickle
 import gc
+import shelve
+import signal
 
 VERSION=(1,1,0)
 __version__='.'.join(str(v for v in VERSION))
@@ -29,21 +31,10 @@ FT=2
 DUR=3
 EXT=4
 
-# potentially unsafe optimizations (safe only if no self-referental
-# structures are used)
-def pickle_load(*args, **kwargs):
-    gc.disable()
-    try:
-        return pickle.load(*args, **kwargs)
-    finally:
-        gc.enable()
-
-def pickle_dump(*args, **kwargs):
-    gc.disable()
-    try:
-        return pickle.dump(*args, **kwargs)
-    finally:
-        gc.enable()
+pickle_dumps = pickle.dumps
+pickle_loads = pickle.loads
+pickle_load = pickle.load
+pickle_dump = pickle.dump
 
 def segment_add(seg, sl):
     """
@@ -120,34 +111,39 @@ def parallel_update_dc(dc, args, hot, concurrency):
                 raise RuntimeError(se)
             sleep(0.125)
 
+    # remove files created, destroy lingering processes
     tempd = mkdtemp()
-    atexit.register(rmtree, tempd)
     def proc_l_kill():
         for p in proc_l:
-            try: p.kill()
+            try: kill(p.pid, signal.SIGKILL)
             except OSError: pass
+
+    atexit.register(rmtree, tempd)
     atexit.register(proc_l_kill)
 
     # create the subprocesses
     for _d in args:
         fname_l.append(os_path_join(tempd, str(len(proc_l))))
-        # call pmdc with 1 argument, write to fname and communicate
-        # with ipc protocol
-        cmd = [argv[0], _d, "-p", "ipc", "-o", fname_l[-1]]
-        if options.cache_file:
-            cmd.extend(["-c", options.cache_file])
+        # call pmdc with same cache and 1 directory argument. Write
+        # new information to ipc file.
+        cmd = [argv[0], argv[1], _d, "-i", fname_l[-1]]
         proc_l.append(Popen(cmd, stdout=PIPE, stderr=PIPE))
         # block until some subprocess exits
         proc_l_pause(concurrency)
-
     # block until all subprocesses exit
     proc_l_pause()
 
-    # update dc and hot using ipc protocol
+    # update dc and hot using ipc_file
     for fname in fname_l:
         _cache = pickle_load(open(fname, 'r'))
-        dc.update(_cache["dc"])
         hot.update(_cache["hot"])
+        # dc is a shelve object; this loop is required
+        for key, val in _cache["dc"].iteritems():
+            dc[key] = val
+
+        # catch anything the needs deleting
+        for key in _cache["delete"]:
+            del dc[key]
 
 def update_dc(dc, d, hot):
     """
@@ -165,7 +161,10 @@ def update_dc(dc, d, hot):
     except KeyError: 
         pass
 
-    keys_seen = set()
+    # store all new information in keys_seen. Modify dc at the very
+    # end.  dc might be shelve object; keys must be strings, and
+    # updating should be explicit.
+    keys_seen = {}
     for dirpath, dirname_l, filename_l in walk(d):
         # remove hot directories from the list to traverse
         for _dir in list(dirname_l):
@@ -180,64 +179,61 @@ def update_dc(dc, d, hot):
         # catch empty 'hot' directories
         if not dirname_l and not filename_l:
             hot[dirpath] = getmtime(dirpath)
-
         for f in filename_l:
             try:
                 (site, frametype, gpsstart, dur, ext) = parse_lfn(f)
             except:
-                # FIXME: this is a good place to record errors
                 continue
-            key = (dirpath, site, frametype, dur, ext)
+
+            key = pickle_dumps((dirpath, site, frametype, dur, ext), -1)
             seg = (gpsstart, gpsstart + dur)
-            # modify dc here (cpython GIL means no required lock).
             # On the initial visit to 'key', initialize
             # segmentlist. On later passes, extend segmentlist.
             if key not in keys_seen:
-                keys_seen.add(key)
-                dc[key] = []
+                keys_seen[key] = []
                 hot[dirpath] = getmtime(dirpath)
-            segment_add(seg, dc[key])
+            segment_add(seg, keys_seen[key])        
+    for key in keys_seen:
+        dc[key] = keys_seen[key]
 
-def print_dc(dc, hot, protocol, ext, fh):
+def write_dc(dc, hot, protocol, ext, fh):
     "write the diskcache to filehandle fh in various formats"
-    if protocol == "ipc":
-        pickle_dump({"dc": dc, "hot": hot}, fh, -1)
-    elif protocol == "ldas":
+    if protocol == "ldas":
         ldas = []
-        for key, val in dc.iteritems():
-            segmentlist = dc[key]
+        for keyp, segmentlist in dc.iteritems():
+            key = pickle_loads(keyp)
             dur = key[DUR]
-            if key[EXT] not in ext: 
+            if key[EXT] not in ext:
                 continue
+            # mimic the ldas format
             _key = list(key[:-1])
-            _key.insert(3, 1)
-            key_str = ','.join([str(s) for s in _key])
+            _key.insert(3,'1')
+            key_str = ','.join(map(str, _key))
             mtime_s = str(int(hot[key[DIRNAME]]))
-            nfile_s = str(sum((seg[1]-seg[0])/dur for seg in segmentlist))
-            # each line of the ascii dump from the original diskcache
-            # terminates with '[0-9]}' and not '[0-9] }' (note lack of
-            # whitespace. This makes doing diffs for sanity checks easier.
-            val_str_l = [key_str, mtime_s, nfile_s,
-                         '{' + ' '.join(str(s) for s in chain(*segmentlist)) + '}']
+            nfile_s = str(sum((s1-s0) for s0, s1 in segmentlist)/dur)
+            val_str_l = [key_str, mtime_s, nfile_s, 
+                         '{' + ' '.join(map(str, chain(*segmentlist))) + '}']
             ldas.append(' '.join(val_str_l))
+        ldas.sort()
         fh.write('\n'.join(ldas))
         fh.write('\n')
     elif protocol == "pmdc":
         pmdc = []
-        for key, val in dc.iteritems():
-            segmentlist = dc[key]
+        for keyp, segmentlist in dc.iteritems():
+            key = pickle_loads(keyp)
             dur = key[DUR]
             if key[EXT] not in ext:
                 continue
             # mimic the ldas format
             _key = list(key)
             _key.insert(3,'x')
-            key_str = ','.join([str(s) for s in _key])
+            key_str = ','.join(map(str, _key))
             mtime_s = str(int(hot[key[DIRNAME]]))
             nfile_s = str(sum((seg[1]-seg[0])/dur for seg in segmentlist))
             val_str_l = [key_str, mtime_s, nfile_s, 
-                         '{', ' '.join(str(s) for s in chain(*segmentlist)), '}']
-            ldas.append(' '.join(val_str_l))
+                         '{', ' '.join(map(str, chain(*segmentlist))), '}']
+            pmdc.append(' '.join(val_str_l))
+        pmdc.sort()
         fh.write('\n'.join(pmdc))
         fh.write('\n')
     elif protocol == "dcfs":
@@ -250,54 +246,65 @@ def print_dc(dc, hot, protocol, ext, fh):
         meta_mid = {}
         # this is the complete listing, a sorted list
         meta_lo = {}
-        for key, seglist in dc.iteritems():
-            try: meta_hi[key[EXT]].add(key[FT])
-            except: meta_hi[key[EXT]] = set([key[FT]])
+        for keyp, seglist in dc.iteritems():
+            key = pickle_loads(keyp)
+            ext = key[EXT]
+            ft = key[FT]
+            site = key[SITE]
 
-            try: meta_mid[(key[EXT],key[FT])].add([key[SITE]])
-            except: meta_mid[(key[EXT],key[FT])] = set([key[SITE]])
+            try: meta_hi[ext].add(ft)
+            except: meta_hi[ext] = set([ft])
+
+            try: meta_mid[(ext,ft)].add([site])
+            except: meta_mid[(ext, ft)] = set([site])
             
             v = (seglist, key[DUR], key[DIRNAME], hot[key[DIRNAME]])
-            k = (key[EXT], key[FT], key[SITE])
-            try:
-                insort(meta_lo[k], v)
-            except:
-                meta_lo[k] = [v]
-                
-        pickle_dump(meta_hi, fh, -1)
-        pickle_dump(meta_mid, fh, -1)
-        pickle_dump(meta_lo, fh, -1)
+            k = (ext, ft, site)
+            try: meta_lo[k].append(v)
+            except: meta_lo[k] = [v]
+        try:
+            gc.disable()
+            pickle_dump(meta_hi, fh, -1)
+            pickle_dump(meta_mid, fh, -1)
+            pickle_dump(meta_lo, fh, -1)
+        finally:
+            gc.enable()
     else:
         raise ValueError("Unknown protocol %s" % str(protocol))
 
 if __name__=="__main__":
     from optparse import OptionParser
-    usage = "usage: %prog [options] dir0 dir1 ..."
+    usage = "usage: %prog <cache> <directory list> [options]"
     parser = OptionParser(usage=usage)
-    parser.add_option("-c", "--cache-file",
-                      help="[None] Name of cache-file to read during initialzation.")
-
-    extension_help = ' '.join("""[[] (empty list)] Scan for files
-                               ending with ".EXTENSION". No
-                               "--extension" flag is equivalent to
-                               passing "--extension gwf".  Use
-                               multiple times for multiple
-                               extensions. The dot is not part of
-                               EXTENSION, do not include it.""".split())
+    extension_help = ' '.join("""[[]] Scan for files ending with
+                               ".EXTENSION". Passing "--extension gwf"
+                               is equivalent to not passing an
+                               extension flag.  Use multiple times for
+                               multiple extensions. The dot is not
+                               part of EXTENSION, do not include it.""".split())
     parser.add_option("-e", "--extension", action="append", default=[],
                       help=extension_help)
 
-    new_cache_file_help = ' '.join(
-        """[None] Name of cache file to save for use with -c flag next
-        time. If CACHE_FILE and NEW_CACHE_FILE are the same,
-        CACHE_FILE will be overwriten just prior to a successful exit.""".split())
-    parser.add_option("-n", "--new-cache-file", help=new_cache_file_help)
-
     output_help = ' '.join(
-        """[-] Name of file to write diskcache output to. 
-           Use '-' for stdout.""".split())
+        """[-] Name of file to write diskcache output to.  Use '-' for
+           stdout. Only applies if used in conjuction with -p
+           flag.""".split())
     parser.add_option("-o", "--output", default="-", help=output_help)
 
+    ipc_help = """[None] Name of file for internal process
+    communication. You probably do not need this."""
+    parser.add_option("-i", "--ipc-file", default=None, help=ipc_help)
+
+    protocol_choices = ("dcfs", "ldas", "pmdc")
+    protocol_help = ' '.join(
+        """[None] Protocol of output to write. Choose from %s.  Use
+        'ldas' for compatibility with ldas-tools.  Use 'pmdc' for an
+        extended protocol that includes file extension information.
+        Formats 'ldas' and 'pmdc' are plain text and results are
+        sorted. 'dcfs' is a format useful for the diskcache
+        filesystem.""".split() ) % str(protocol_choices)
+    parser.add_option("-p", "--protocol", choices=protocol_choices,
+                      help=protocol_help)
     concurrency_help = ' '.join(
         """[5] Maximum number of concurrent scan processes. Only
            applicable if more than 1 directory is passed as a
@@ -305,26 +312,22 @@ if __name__=="__main__":
     parser.add_option("-r", "--concurrency", type="int", default=5,
                       help=concurrency_help)
 
-    protocol_choices = ("dcfs", "ipc", "ldas", "pmdc")
-    protocol_help = ' '.join(
-        """[ldas] Protocol of output to write. Valid values are %s.
-                     Use 'ldas' for compatibility with ldas-tools.
-                     Use 'pmdc' for an extended protocol that includes
-                     file extension information.  'ipc' is used for
-                     internal communication and also uses the cache
-                     differently. Formats 'ldas' and 'pmdc' are plain
-                     text and results are sorted. 'dcfs' is a format
-                     useful for the diskcache filesystem.""".split()
-        ) % str(protocol_choices)
-    parser.add_option("-p", "--protocol", default='ldas',
-                      choices=protocol_choices, help=protocol_help)
     (options, args) = parser.parse_args()
 
-    # cache file format: 3 pickled dicts.
-    # 
-    # (dict) header: 
-    #   header has a 'version' key (and several keys with cli
-    #   arguments, etc.)
+    # args requires cache_file and a list of 1 or more directories.
+    # Branch depending on the case at hand.  If directory list has 1
+    # element then run in main thread.  If directory list is longer,
+    # fork one process for each entry.
+    if not args:
+        parser.error("No cache provided")
+        exit(1)
+
+    if len(args) == 1:
+        parser.error("No directories listed")
+        exit(1)
+    cache_file = args[0]
+
+    # the cache_file holds the 'hot' dict (and some other stuff).
     #
     # (dict) hot:
     #    key: dirpath
@@ -332,57 +335,72 @@ if __name__=="__main__":
     # 'hot' dirs are directories that have been completely
     # indexed. This includes empty dirs.
     #
-    # NB: the value of mtime was sampled when the last new dc key
-    # containing dirpath was added.
+    # The value of mtime was sampled when (approximately) the last new
+    # dc key containing dirpath was added.
+    try: hot = pickle_load(open(cache_file, 'r'))["hot"]
+    except: hot = {}
+
+    # If using interprocess communication, then dc must be
+    # empty. Otherwise, populate dc from cache.  
     # 
-    # (dict) dc:
-    #     key: (dirpath, site, frametype, dur, ext)
-    #     value: segmentlist associated with key
-    dc = {}
-    hot = {}
-    header ={}
-    if options.cache_file is not None:
-        # python 2.4; this should be in a context manager
-        fh = open(options.cache_file, 'r')
-
-        header = pickle_load(fh)
-        if header['version'] != VERSION:
-            raise RuntimeError("Cache file version mismatch")
-
-        hot = pickle_load(fh)
-
-        # All protocols (except 'ipc') should populate dc with cached
-        # information.
-        if options.protocol != 'ipc':
-            dc = pickle_load(fh)
-        fh.close()
-
-    # args has length 0, 1 or more than 1. Branch depending on the
-    # case at hand.  If args has len 1, then run in main thread.  If
-    # args has length >1, fork one process for each argument.
-    if not args:
-        parser.error("No directories listed")
-        exit(1)
-    elif len(args) == 1:
-        update_dc(dc, args[0], hot)
+    # (shelve,dict) dc:
+    #   key: pickle.dumps((dirpath, site, frametype, dur, ext)) 
+    #   value: segmentlist associated with key
+    if options.ipc_file is None:
+        dc = shelve.open(cache_file + '.shlv')
     else:
-        parallel_update_dc(dc, args, hot, options.concurrency)
+        dc = {}
 
-    if options.output == "-":
-        fh = stdout
+    if len(args) == 2:
+        update_dc(dc, args[1], hot)
     else:
-        fh = open(options.output, 'w')
+        parallel_update_dc(dc, args[1:], hot, options.concurrency)
 
-    extension = set(options.extension)
-    if not extension: extension.add('gwf')
-    print_dc(dc, hot, options.protocol, extension, fh)
+    # write alternative output formats if requested to desired output
+    if options.protocol is not None:
+        if options.output == "-":
+            fh = stdout
+        else:
+            fh = open(options.output, 'w')
+        extension = set(options.extension)
+        if not extension: 
+            extension.add('gwf')
+        write_dc(dc, hot, options.protocol, extension, fh)
 
-    # write new cache file: header, hot and dc in that order.
-    if options.new_cache_file is not None:
-        fh = open(options.new_cache_file, 'w')
-        header = { "options": options, "args": args, 
-                   "version": VERSION }
-        pickle_dump(header, fh, -1)
-        pickle_dump(hot, fh, -1)
-        pickle_dump(dc, fh, -1)
-        fh.close()
+    # all done now save state.
+    #
+    # If using ipc, save dc as part of meta information to ipc_file.
+    # Otherwise, save dc shelve object and save remaining meta to
+    # cache_file.
+    meta = {"version": VERSION,
+            "args": args,
+            "options": options}
+    if options.ipc_file is None:
+        dc.close()
+        meta_f = cache_file
+        meta["hot"] = hot
+    else:
+        # save only new information as recorded in 'dc'
+        _hot = {}
+        _del = set()
+
+        _dc =  shelve.open(cache_file + '.shlv', 'r')
+        for keyp in dc:
+            key = pickle_loads(keyp)
+            _hot[key[DIRNAME]] = hot[key[DIRNAME]]
+
+            # get list of keys to delete from dc: all keys with the
+            # same dirname but different key.
+            dirname = key[DIRNAME]
+            d_keys = set([k for k in _dc if pickle_loads(k)[DIRNAME] == dirname])
+            g_keys = set([k for k in dc if pickle_loads(k)[DIRNAME] == dirname])
+            for k in d_keys:
+                if k not in g_keys:
+                    _del.add(k)
+
+        meta_f = options.ipc_file
+        meta["dc"] = dc
+        meta["hot"] = _hot
+        meta["delete"] = _del
+
+    pickle_dump(meta, open(meta_f, 'w'), -1)

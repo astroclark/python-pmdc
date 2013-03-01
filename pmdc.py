@@ -4,7 +4,7 @@
 # poor man's diskcache
 #
 # a self-contained python program that scans directories for frames
-from bisect import bisect_left, insort
+from bisect import bisect_left
 from itertools import chain
 from os import kill, walk
 from os.path import join as os_path_join, getmtime
@@ -141,10 +141,6 @@ def parallel_update_dc(dc, args, hot, concurrency):
         for key, val in _cache["dc"].iteritems():
             dc[key] = val
 
-        # catch anything the needs deleting
-        for key in _cache["delete"]:
-            del dc[key]
-
 def update_dc(dc, d, hot):
     """
     modify the dictionary dc to reflect the "diskcache content of
@@ -185,92 +181,93 @@ def update_dc(dc, d, hot):
             except:
                 continue
 
-            key = pickle_dumps((dirpath, site, frametype, dur, ext), -1)
-            seg = (gpsstart, gpsstart + dur)
-            # On the initial visit to 'key', initialize
-            # segmentlist. On later passes, extend segmentlist.
-            if key not in keys_seen:
-                keys_seen[key] = []
+            if dirpath not in keys_seen:
+                keys_seen[dirpath] = {}
                 hot[dirpath] = getmtime(dirpath)
-            segment_add(seg, keys_seen[key])        
-    for key in keys_seen:
-        dc[key] = keys_seen[key]
 
-def write_dc(dc, hot, protocol, ext, fh):
+            sfde = (site, frametype, dur, ext)
+            seg = (gpsstart, gpsstart + dur)
+            if sfde not in keys_seen[dirpath]:
+                keys_seen[dirpath][sfde] = []
+            segment_add(seg, keys_seen[dirpath][sfde])
+    for dirpath in keys_seen:
+        dc[dirpath] = keys_seen[dirpath]
+
+def write_dc(dc, hot, protocol, extension, fh):
     "write the diskcache to filehandle fh in various formats"
     if protocol == "ldas":
-        ldas = []
-        for keyp, segmentlist in dc.iteritems():
-            key = pickle_loads(keyp)
-            dur = key[DUR]
-            if key[EXT] not in ext:
-                continue
-            # mimic the ldas format
-            _key = list(key[:-1])
-            _key.insert(3,'1')
-            key_str = ','.join(map(str, _key))
-            mtime_s = str(int(hot[key[DIRNAME]]))
-            nfile_s = str(sum((s1-s0) for s0, s1 in segmentlist)/dur)
-            val_str_l = [key_str, mtime_s, nfile_s, 
-                         '{' + ' '.join(map(str, chain(*segmentlist))) + '}']
-            ldas.append(' '.join(val_str_l))
-        ldas.sort()
-        fh.write('\n'.join(ldas))
+        # mimic the ldas format
+        #
+        # /foo/bar,site,frametype,1,dur timestamp nfiles {120000 122272 122304 130016}
+        text = []
+        import re
+        notalpha_sub = re.compile('[\W]+').sub
+        for dirname in dc:
+            for site, frametype, dur, ext in dc[dirname]:
+                if ext not in extension:
+                    continue
+                segmentlist = dc[dirname][(site, frametype, dur, ext)]
+                sl_s = '{' + notalpha_sub(' ', str(segmentlist)).strip() + '}'
+                key_s = ','.join((dirname, site, frametype, '1', str(dur)))
+                mtime_s = str(int(hot[dirname]))
+                nfile_s = str(sum(s1-s0 for s0, s1 in segmentlist)/dur)
+                text.append(' '.join((key_s, mtime_s, nfile_s, sl_s)))
+        text.sort()
+        fh.write('\n'.join(text))
         fh.write('\n')
     elif protocol == "pmdc":
-        pmdc = []
-        for keyp, segmentlist in dc.iteritems():
-            key = pickle_loads(keyp)
-            dur = key[DUR]
-            if key[EXT] not in ext:
-                continue
-            # mimic the ldas format
-            _key = list(key)
-            _key.insert(3,'x')
-            key_str = ','.join(map(str, _key))
-            mtime_s = str(int(hot[key[DIRNAME]]))
-            nfile_s = str(sum((seg[1]-seg[0])/dur for seg in segmentlist))
-            val_str_l = [key_str, mtime_s, nfile_s, 
-                         '{', ' '.join(map(str, chain(*segmentlist))), '}']
-            pmdc.append(' '.join(val_str_l))
-        pmdc.sort()
-        fh.write('\n'.join(pmdc))
+        text = []
+        import re
+        notalpha_sub = re.compile('[\W]+').sub
+        for dirname in dc:
+            for site, frametype, dur, ext in dc[dirname]:
+                if ext not in extension:
+                    continue
+                segmentlist = dc[dirname][(site, frametype, dur, ext)]
+                sl_s = '{' + notalpha_sub(' ', str(segmentlist)).strip() + '}'
+                key_s = ','.join((dirname, site, frametype, 'x', str(dur), ext))
+                mtime_s = str(int(hot[dirname]))
+                nfile_s = str(sum(s1-s0 for s0, s1 in segmentlist)/dur)
+                text.append(' '.join((key_s, mtime_s, nfile_s, sl_s)))
+        text.sort()
+        fh.write('\n'.join(text))
         fh.write('\n')
     elif protocol == "dcfs":
-        # structures useful for building/browsing the 'dcfs'.  These
-        # should be defaultdicts but we need python 2.4 compatibility
-        
-        # browse high levels of dcfs tree with meta_hi
-        meta_hi = {}
-        # browse middle levels of dcfs tree with meta_mid
-        meta_mid = {}
-        # this is the complete listing, a sorted list
-        meta_lo = {}
-        for keyp, seglist in dc.iteritems():
-            key = pickle_loads(keyp)
-            ext = key[EXT]
-            ft = key[FT]
-            site = key[SITE]
-
-            try: meta_hi[ext].add(ft)
-            except: meta_hi[ext] = set([ft])
-
-            try: meta_mid[(ext,ft)].add([site])
-            except: meta_mid[(ext, ft)] = set([site])
-            
-            v = (seglist, key[DUR], key[DIRNAME], hot[key[DIRNAME]])
-            k = (ext, ft, site)
-            try: meta_lo[k].append(v)
-            except: meta_lo[k] = [v]
-        try:
-            gc.disable()
-            pickle_dump(meta_hi, fh, -1)
-            pickle_dump(meta_mid, fh, -1)
-            pickle_dump(meta_lo, fh, -1)
-        finally:
-            gc.enable()
+        raise NotImplementedError("dcfs is not implemented")
     else:
         raise ValueError("Unknown protocol %s" % str(protocol))
+    #     # structures useful for building/browsing the 'dcfs'.  These
+    #     # should be defaultdicts but we need python 2.4 compatibility
+    #     
+    #     # browse high levels of dcfs tree with meta_hi
+    #     meta_hi = {}
+    #     # browse middle levels of dcfs tree with meta_mid
+    #     meta_mid = {}
+    #     # this is the complete listing, a sorted list
+    #     meta_lo = {}
+    #     for keyp, seglist in dc.iteritems():
+    #         key = pickle_loads(keyp)
+    #         ext = key[EXT]
+    #         ft = key[FT]
+    #         site = key[SITE]
+    # 
+    #         try: meta_hi[ext].add(ft)
+    #         except: meta_hi[ext] = set([ft])
+    # 
+    #         try: meta_mid[(ext,ft)].add([site])
+    #         except: meta_mid[(ext, ft)] = set([site])
+    #         
+    #         v = (seglist, key[DUR], key[DIRNAME], hot[key[DIRNAME]])
+    #         k = (ext, ft, site)
+    #         try: meta_lo[k].append(v)
+    #         except: meta_lo[k] = [v]
+    #     try:
+    #         gc.disable()
+    #         pickle_dump(meta_hi, fh, -1)
+    #         pickle_dump(meta_mid, fh, -1)
+    #         pickle_dump(meta_lo, fh, -1)
+    #     finally:
+    #         gc.enable()
 
 if __name__=="__main__":
     from optparse import OptionParser
@@ -382,25 +379,8 @@ if __name__=="__main__":
     else:
         # save only new information as recorded in 'dc'
         _hot = {}
-        _del = set()
-
-        _dc =  shelve.open(cache_file + '.shlv', 'r')
-        for keyp in dc:
-            key = pickle_loads(keyp)
-            _hot[key[DIRNAME]] = hot[key[DIRNAME]]
-
-            # get list of keys to delete from dc: all keys with the
-            # same dirname but different key.
-            dirname = key[DIRNAME]
-            d_keys = set([k for k in _dc if pickle_loads(k)[DIRNAME] == dirname])
-            g_keys = set([k for k in dc if pickle_loads(k)[DIRNAME] == dirname])
-            for k in d_keys:
-                if k not in g_keys:
-                    _del.add(k)
-
         meta_f = options.ipc_file
         meta["dc"] = dc
-        meta["hot"] = _hot
-        meta["delete"] = _del
+        meta["hot"] = dict(zip(dc.keys(), [hot[k] for k in dc]))
 
     pickle_dump(meta, open(meta_f, 'w'), -1)

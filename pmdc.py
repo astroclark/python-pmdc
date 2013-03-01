@@ -6,14 +6,19 @@
 # a self-contained python program that scans directories for frames
 from bisect import bisect_left
 from itertools import chain
-from os import kill, walk
-from os.path import join as os_path_join, getmtime
+from os.path import abspath, exists, join as os_path_join, getmtime
 from sys import argv, exit, stdout
 
+import atexit
 import cPickle as pickle
+import datetime
 import gc
+import glob
+import os
 import shelve
 import signal
+import stat
+import time
 
 VERSION=(1,1,0)
 __version__='.'.join(str(v for v in VERSION))
@@ -90,7 +95,6 @@ def parallel_update_dc(dc, args, hot, concurrency):
     from subprocess import PIPE, Popen
     from tempfile import mkdtemp
     from time import sleep
-    import atexit
     
     # the process list
     proc_l = []
@@ -115,7 +119,7 @@ def parallel_update_dc(dc, args, hot, concurrency):
     tempd = mkdtemp()
     def proc_l_kill():
         for p in proc_l:
-            try: kill(p.pid, signal.SIGKILL)
+            try: os.kill(p.pid, signal.SIGKILL)
             except OSError: pass
 
     atexit.register(rmtree, tempd)
@@ -161,7 +165,7 @@ def update_dc(dc, d, hot):
     # end.  dc might be shelve object; keys must be strings, and
     # updating should be explicit.
     keys_seen = {}
-    for dirpath, dirname_l, filename_l in walk(d):
+    for dirpath, dirname_l, filename_l in os.walk(d):
         # remove hot directories from the list to traverse
         for _dir in list(dirname_l):
             _fulldir = os_path_join(dirpath, _dir)
@@ -271,7 +275,7 @@ def write_dc(dc, hot, protocol, extension, fh):
 
 if __name__=="__main__":
     from optparse import OptionParser
-    usage = "usage: %prog <cache> <directory list> [options]"
+    usage = "usage: %prog <cache namespace> [<directory list>] [options]"
     parser = OptionParser(usage=usage)
     extension_help = ' '.join("""[[]] Scan for files ending with
                                ".EXTENSION". Passing "--extension gwf"
@@ -309,6 +313,10 @@ if __name__=="__main__":
     parser.add_option("-r", "--concurrency", type="int", default=5,
                       help=concurrency_help)
 
+    status_help = "Print some info and exit. The directory list may be empty."
+    parser.add_option("-s", "--status", action="store_true", default=False,
+                      help=status_help)
+
     (options, args) = parser.parse_args()
 
     # args requires cache_file and a list of 1 or more directories.
@@ -318,13 +326,21 @@ if __name__=="__main__":
     if not args:
         parser.error("No cache provided")
         exit(1)
-
-    if len(args) == 1:
-        parser.error("No directories listed")
-        exit(1)
+    
+    # we have a good namespace
     cache_file = args[0]
 
-    # the cache_file holds the 'hot' dict (and some other stuff).
+    # set up lock file for master process to protect 1 writer
+    if not options.ipc_file: 
+        lock_file = cache_file + '.lock'
+        if exists(lock_file):
+            raise RuntimeError("Lock file %s exists." % abspath(lock_file))
+        open(lock_file, 'w')
+        atexit.register(os.unlink, lock_file)
+
+    # the cache_file holds the 'hot' dict and some other info that is
+    # used later.  After this point, the cache_file is assumed to
+    # exist and contain two keys: "hot" and "header".
     #
     # (dict) hot:
     #    key: dirpath
@@ -334,9 +350,32 @@ if __name__=="__main__":
     #
     # The value of mtime was sampled when (approximately) the last new
     # dc key containing dirpath was added.
-    try: hot = pickle_load(open(cache_file, 'r'))["hot"]
-    except: hot = {}
+    try: 
+        fh = open(cache_file, 'r')
+        initial_run = False        # has the cache_file been created?
+    except: 
+        initial_run = True
+        header = {"initial run": initial_run, "timestamp": datetime.datetime.today()}
+        pickle_dump({"hot": {}, "header": header}, open(cache_file, 'w'))
+        fh = open(cache_file, 'r')
 
+    if options.status:
+        header= pickle_load(fh)["header"]
+        for kv in header.iteritems():
+            print "%s: %s" % kv
+        age = datetime.datetime.today() - header['timestamp']
+        print "state age: %s" % str(age)
+        exit(0)
+
+    # sanity check before loading 'hot' from file
+    if len(args) == 1:
+        parser.error("No directories listed")
+        exit(1)
+
+    hot = pickle_load(fh)["hot"]
+    fh.close()
+    shelve_file = cache_file + ".shlv"
+    
     # If using interprocess communication, then dc must be
     # empty. Otherwise, populate dc from cache.  
     # 
@@ -344,16 +383,19 @@ if __name__=="__main__":
     #   key: pickle.dumps((dirpath, site, frametype, dur, ext)) 
     #   value: segmentlist associated with key
     if options.ipc_file is None:
-        dc = shelve.open(cache_file + '.shlv')
+        dc = shelve.open(shelve_file)
     else:
         dc = {}
 
+    start_scan_t = time.time()
     if len(args) == 2:
         update_dc(dc, args[1], hot)
     else:
         parallel_update_dc(dc, args[1:], hot, options.concurrency)
+    end_scan_t = time.time()
 
     # write alternative output formats if requested to desired output
+    start_write_t = time.time()
     if options.protocol is not None:
         if options.output == "-":
             fh = stdout
@@ -363,18 +405,34 @@ if __name__=="__main__":
         if not extension: 
             extension.add('gwf')
         write_dc(dc, hot, options.protocol, extension, fh)
+    end_write_t = time.time()
 
     # all done now save state.
     #
     # If using ipc, save dc as part of meta information to ipc_file.
     # Otherwise, save dc shelve object and save remaining meta to
     # cache_file.
-    meta = {"version": VERSION,
-            "args": args,
-            "options": options}
+    meta = {}
     if options.ipc_file is None:
+        start_close_t = time.time()
         dc.close()
+        end_close_t = time.time()
+
+        header = {"version": VERSION,
+                  "initial run": initial_run,
+                  "timestamp": datetime.datetime.today(),
+                  "args": args,
+                  "options": options,
+                  "ndir": len(hot),
+                  "close dur": end_close_t - start_close_t,
+                  "scan dur": end_scan_t - start_scan_t,
+                  "write dur": end_write_t - start_write_t,
+                  "pickle size": os.stat(cache_file)[stat.ST_SIZE],
+                  "shelve size": sum(os.stat(f)[stat.ST_SIZE] 
+                                     for f in glob.glob(shelve_file + '*'))
+                  }
         meta_f = cache_file
+        meta["header"] = header
         meta["hot"] = hot
     else:
         # save only new information as recorded in 'dc'

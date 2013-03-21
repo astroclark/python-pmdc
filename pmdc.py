@@ -22,7 +22,7 @@ import tempfile
 import time
 
 VERSION=(1,1,1)
-__version__='.'.join(str(v for v in VERSION))
+__version__='.'.join(map(str, VERSION))
 __author__="Jeffery Kline"
 __copyright__="Copyright 2013, Jeffery Kline"
 __license__="GPL"
@@ -252,7 +252,10 @@ if __name__=="__main__":
     Use a lock file to prevent more than one scan that depends on
     <cache namespace> from occuring at the same time (this is useful
     for cron jobs).""".split())
-    parser = OptionParser(usage=usage, description=description)
+
+    version = "%%prog %s" % __version__
+
+    parser = OptionParser(usage=usage, description=description, version=version)
     extension_help = ' '.join("""[[]] Scan for files ending with
                                ".EXTENSION". Passing "--extension gwf"
                                is equivalent to not passing an

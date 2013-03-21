@@ -1,0 +1,16 @@
+Source: python-pmdc
+Section: python
+Priority: extra
+Maintainer: LIGO LDR team <ldr@ligo.org>
+Uploaders: Jeffery Kline <jeffery.kline@gmail.com>
+Build-Depends: debhelper (>= 7.0.50), python2.6 (>= 2.6.6), python-all-dev (>= 2.6.6)
+Standards-Version: 3.9.1
+Homepage: http://www.lsc-group.phys.uwm.edu/LDR
+X-Python-Version: >= 2.6
+
+Package: python-pmdc
+Architecture: any
+Pre-Depends: debconf (>= 1.5.36)
+Depends: ${misc:Depends}, ${python:Depends}
+Description: PMDC package
+ Efficiently search file systems for frames, cache results in various formats.

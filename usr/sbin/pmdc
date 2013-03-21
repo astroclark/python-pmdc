@@ -7,7 +7,7 @@
 from bisect import bisect_left
 from itertools import chain
 from os.path import abspath, dirname, exists, join as os_path_join, getmtime
-from sys import argv, exit, stdout
+from sys import argv, exit, stdout, stderr
 
 import atexit
 import cPickle as pickle
@@ -132,7 +132,7 @@ def parallel_update_dc(dc, args, hot, concurrency):
         # call pmdc with same cache and 1 directory argument. Write
         # new information to ipc file.
         cmd = [argv[0], argv[1], _d, "-i", fname_l[-1]]
-        proc_l.append(Popen(cmd, stdout=PIPE, stderr=PIPE))
+        proc_l.append(Popen(cmd, stdout=stdout, stderr=stderr))
         # block until some subprocess exits
         proc_l_pause(concurrency)
     # block until all subprocesses exit

@@ -30,7 +30,5 @@ setup(name="python-pmdc",
       author="Jeff Kline",
       author_email="ldr@ligo.org",
       license="GPL v3",
-      py_modules=["pmdc"],
-      package_dir={"": "lib"},
       scripts=glob.glob("usr/sbin/*"),
       data_files=data_files)

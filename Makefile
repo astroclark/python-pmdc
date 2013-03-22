@@ -12,7 +12,7 @@
 # (C) Jeffery Kline 2011
 # GNU/GPL v3
 PKGNAME=python-pmdc
-VERSION=1.0.0
+VERSION=1.0.1
 
 # RPMDIR is used by Scientific Linux
 #        causes no harm on Debian.

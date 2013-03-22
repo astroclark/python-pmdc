@@ -7,7 +7,7 @@ import os
 # common paths across platforms
 # version must be set as a string
 # other scripts look for """'version' = """ in this file.
-version = "1.0.0" 
+version = "1.0.1" 
 path_dir_list = [ "/usr/share/man/man8",
                   "/usr/share/doc/python-pmdc",]
 
@@ -30,5 +30,7 @@ setup(name="python-pmdc",
       author="Jeff Kline",
       author_email="ldr@ligo.org",
       license="GPL v3",
+      py_modules=["fuse", "dcfs"],
+      package_dir={"": "lib"},
       scripts=glob.glob("usr/sbin/*"),
       data_files=data_files)

@@ -1,3 +1,9 @@
+python-pmdc (1.0.1) UNRELEASED; urgency=low
+
+  * initial addition of dcfs protocol
+
+ -- Jeffery Kline <jeffery.kline@gmail.com>  Thu, 21 Mar 2013 16:40:37 -0500
+
 python-pmdc (1.0.0) UNRELEASED; urgency=low
 
   * Initial release.

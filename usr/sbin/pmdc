@@ -21,7 +21,7 @@ import stat
 import tempfile
 import time
 
-VERSION=(1,1,1)
+VERSION=(1,0,1)
 __version__='.'.join(map(str, VERSION))
 __author__="Jeffery Kline"
 __copyright__="Copyright 2013, Jeffery Kline"
@@ -238,7 +238,34 @@ def write_dc(dc, hot, protocol, extension, fh):
         fh.write('\n'.join(text))
         fh.write('\n')
     elif protocol == "dcfs":
-        raise NotImplementedError("dcfs is not implemented")
+        # the file list of dcfs looks like this:
+        # 
+        # extension/
+        # extension/frame-type/
+        # extension/frame-type/site
+        # extension/frame-type/site/gps[:-5]
+        # extension/frame-type/site/gps[:-5]/site-ft-gps-dur.ext
+        # 
+        # to get this list quickly, we use dicts as follows:
+        # 
+        # extension -> frame-types
+        # (extension, frame-types) -> site
+        # (extension, frame-types, site) -> (dirname, duration, segmentlist)
+        from collections import defaultdict
+        d_ext = defaultdict(set)
+        d_ext_ft = defaultdict(set)
+        d_ext_ft_site = defaultdict(list)
+        for dirname in dc:
+            for site, frametype, dur, ext in dc[dirname]:
+                if ext not in extension:
+                    continue
+                d_ext[ext].add(frametype)
+                d_ext_ft[(ext, frametype)].add(site)
+                d_ext_ft_site[(ext, frametype, site)].append(
+                    (dirname, dur, dc[dirname][(site, frametype, dur, ext)]))
+        pickle_dump(d_ext, fh)
+        pickle_dump(d_ext_ft, fh)
+        pickle_dump(d_ext_ft_site, fh)
     else:
         raise ValueError("Unknown protocol %s" % str(protocol))
 

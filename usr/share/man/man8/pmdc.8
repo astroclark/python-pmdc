@@ -1,0 +1,168 @@
+.\" Local Variables: .\" mode: nroff .\" End:
+.\" TITLE
+.TH PMDC 8 "Thu Mar 21 18:40:10 UTC 2013" "Manpage for pmdc version 1.0.0"
+.SH NAME
+pmdc \- A script that concurrently scans multiple filesystems for files with frame-like names
+.
+.SH SYNOPSIS
+.SY pmdc
+.OP \-e extension
+.OP \-o output
+.OP \-i internal communication filename
+.OP \-p protocol ('dcfs', 'ldas', 'pmdc').
+.OP \-r concurrency
+cache_namespace dir0 [dir1... dirn]
+.
+.
+.SY pmdc
+.OP \-s status
+cache_namespace
+.
+.
+.SY pmdc
+.OP \-h
+| 
+.OP \-\-help
+.
+.
+.SY pmdc
+.OP \-v
+| 
+.OP \-\-version
+.
+.
+.SH OPTIONS
+.TP
+.BI \-e EXTENSION
+.TQ
+.BI \-\-extension\  EXTENSION 
+[[]] Scan for files ending with ".EXTENSION". Passing "--extension
+gwf" is equivalent to not passing an extension flag. Use multiple
+times for multiple extensions. The dot is not part of EXTENSION, do
+not include it.
+.
+.
+.TP
+.BI \-o OUTPUT
+.TQ
+.BI \-\-output\  OUTPUT
+[-] Name of file to write diskcache output to. Use '-' for stdout. If
+a filename is provided, then the write operation is guaranteed to be
+atomic (so that manual manipulation of temporary files is not
+required). This flag only applies if used in conjuction with -p flag.
+.
+.
+.TP
+.BI \-i IPC_FILE
+.TQ 
+.BI \-\-ipc-file\  IPC_FILE
+[None] Name of file for internal process communication. If used, then
+directory list must have length 1.  Regular users do not need to use
+this flag.
+.
+.
+.TP
+.BI \-p PROTOCOL
+.TQ
+.BI \-\-protocol\  PROTOCOL
+[None] Protocol of output to write. Choose from
+('dcfs', 'ldas', 'pmdc'). Use 'ldas' for compatibility with
+ldas-tools. Use 'pmdc' for an extended protocol that includes file
+extension information. Formats 'ldas' and 'pmdc' are plain text and
+results are sorted. 'dcfs' is a format useful for the diskcache
+filesystem.
+.
+.
+.TP
+.BI \-r CONCURRENCY
+.TQ 
+.BI \-\-concurrency\  CONCURRENCY
+[5] Maximum number of concurrent scan processes. Only applicable if
+more than 1 directory is passed as a positional argument.
+.
+.
+.TP
+.BI \-s
+.TQ 
+.BI \-\-status
+Print some info about 
+.I cache_namespace 
+and exit.
+.
+.
+.SH DESCRIPTION
+This document describes
+.BR pmdc ,
+a python script that scans multiple filesystems for files whose names
+follow the naming convention
+.RS
+.EX
+site-frametype-gpsstart-dur.ext
+.EE
+.RE
+where site, frametype and ext are strings of alphanumeric + underscore
+characters and gpsstart and dur must be integers.
+.
+.
+.P
+In a typical use scenario, pmdc will cache its state in files under
+.IR cache_namespace .
+Subsequent calls with the same arguments typically execute a complete
+scan of large filesystems much faster than the initial scan.
+.
+.
+.P
+If pmdc is called with the -o flag, it will save the results
+atomicly. This means, for example, that services which read pmdc ASCII
+dumps will not accidently read partially-written or incomplete files.
+.
+.
+.P
+pmdc is "cron-safe": pmdc will exit if it detects (via a lock file in the 
+.I cache-namespace
+)
+another pmdc scan is running. See the EXAMPLES section below for an
+example script executed by cron.
+.
+.
+.P 
+pmdc will spawn one process per directory, up to a maximum of
+CONCURRENCY processes.  A good rule of thumb is to pass one argument
+per server being scanned and to set CONCURRENCY equal to the number of
+servers being scanned.
+.
+.
+.SH EXAMPLES
+.
+.
+The job executed by cron at UWM follows.
+.RS
+.EX
+#!/bin/sh
+set -e
+BIN=/usr/sbin/pmdc
+DIR=/var/lib/dc
+BASENAME=${DIR}/pmdc
+CACHE=${BASENAME}.cache
+MOUNT_POINTS=`ls -d /nfsdata/x4500-[3-9]/  /nfsdata/x4500-1[0-9]`
+OPTS="--concurrency 11 -e gwf -e sft -p ldas -o ${BASENAME}.txt"
+
+${BIN} ${CACHE} ${MOUNT_POINTS} ${OPTS}
+.EE
+.RE
+.
+.
+.SH FILES
+.P
+.TP
+.B /var/lib/dc 
+This is the strongly-suggested location for cache files.
+.
+.
+.SH BUGS
+None known.
+.
+.
+.SH AUTHOR
+Jeffery Kline (jeffery.kline@gravity.phys.uwm.edu)
+

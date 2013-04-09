@@ -84,7 +84,7 @@ def parse_lfn(lfn):
     dur = int(dur_s)
     return (site, frametype, gpsstart, dur, ext)
 
-def parallel_update_dc(dc, args, hot, concurrency):
+def parallel_update_dc(dc, args, hot, concurrency, tempdir):
     """Update dc in parallel by forking off 1 'pmdc.py' process per
     entry in args, running at most 'concurrency' processes at one
     time.
@@ -117,7 +117,7 @@ def parallel_update_dc(dc, args, hot, concurrency):
             sleep(0.125)
 
     # remove files created, destroy lingering processes
-    tempd = mkdtemp()
+    tempd = mkdtemp(dir=tempdir)
     def proc_l_kill():
         for p in proc_l:
             try: os.kill(p.pid, signal.SIGKILL)
@@ -300,6 +300,10 @@ if __name__=="__main__":
            with -p flag.""".split())
     parser.add_option("-o", "--output", default="-", help=output_help)
 
+    status_help = "[0644] Numeric mode of atomicly-written files."
+    parser.add_option("-m", "--output-file-mode", type="int", default=0644,
+                      help=status_help)
+
     ipc_help = ' '.join("""[None] Name of file for internal process
     communication. If used, then directory list must have length 1.
     """.split())
@@ -321,6 +325,13 @@ if __name__=="__main__":
            positional argument.""".split())
     parser.add_option("-r", "--concurrency", type="int", default=5,
                       help=concurrency_help)
+
+
+    tempdir_help = ' '.join(
+        """[None] Temporary directory. Only applicable if more than 1
+           directory is passed as a positional argument. It is used by
+           forked processes which use it for IPC.""".split())
+    parser.add_option("-t", "--tempdir", default=None, help=tempdir_help)
 
     status_help = "Print some info and exit."
     parser.add_option("-s", "--status", action="store_true", default=False,
@@ -398,7 +409,7 @@ if __name__=="__main__":
     if len(args) == 2:
         update_dc(dc, args[1], hot)
     elif len(args) >2:
-        parallel_update_dc(dc, args[1:], hot, options.concurrency)
+        parallel_update_dc(dc, args[1:], hot, options.concurrency, options.tempdir)
     end_scan_t = time.time()
 
     # write atomicly. alternative output formats if requested to
@@ -417,6 +428,7 @@ if __name__=="__main__":
         # finish the atomic write
         if fh != stdout:
             fh.flush()
+            os.chmod(fh.name, options.output_file_mode)
             os.rename(fh.name, options.output)
             # put a dummy file on disk so NamedTemporaryFile does not
             # complain at exit. This is for python 2.4 (delete=True
@@ -463,6 +475,7 @@ if __name__=="__main__":
     fh = tempfile.NamedTemporaryFile(dir=dirname(meta_f))
     pickle_dump(meta, fh, -1)
     fh.flush()
+    os.chmod(fh.name, options.output_file_mode)
     os.rename(fh.name, meta_f)
     # put a dummy file on disk so NamedTemporaryFile does not complain
     # at exit. This is for python 2.4 (delete=True came in python 2.6)

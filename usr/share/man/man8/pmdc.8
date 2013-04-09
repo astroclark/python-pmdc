@@ -8,10 +8,12 @@ pmdc \- A script that concurrently scans multiple filesystems for files with fra
 .SY pmdc
 .OP \-e extension
 .OP \-o output
+.OP \-m output file mode
 .OP \-i internal communication filename
 .OP \-p protocol ('dcfs', 'ldas', 'pmdc').
 .OP \-r concurrency
 cache_namespace dir0 [dir1... dirn]
+.OP \-t tempdir
 .
 .
 .SY pmdc
@@ -51,6 +53,12 @@ a filename is provided, then the write operation is guaranteed to be
 atomic (so that manual manipulation of temporary files is not
 required). This flag only applies if used in conjuction with -p flag.
 .
+.TP
+.BI \-m OUTPUT_FILE_MODE
+.TQ
+.BI \-\-output-file-mode\  OUTPUT_FILE_MODE
+[0644] Numeric mode of atomicly-written files.
+.
 .
 .TP
 .BI \-i IPC_FILE
@@ -88,6 +96,15 @@ more than 1 directory is passed as a positional argument.
 Print some info about 
 .I cache_namespace 
 and exit.
+.
+.
+.TP
+.BI \-t TEMPDIR
+.TQ
+.BI \-\-tempdir TEMPDIR
+[None] Temporary directory. Only applicable if more than 1 directory
+is passed as a positional argument.  It is used by forked processes
+which use it for IPC.
 .
 .
 .SH DESCRIPTION

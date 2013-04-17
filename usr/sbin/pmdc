@@ -208,6 +208,7 @@ def write_dc(dc, hot, protocol, extension, fh):
         import re
         notalpha_sub = re.compile('[\W]+').sub
         for dirname in dc:
+            gc.disable()
             for site, frametype, dur, ext in dc[dirname]:
                 if ext not in extension:
                     continue
@@ -217,6 +218,7 @@ def write_dc(dc, hot, protocol, extension, fh):
                 mtime_s = str(int(hot[dirname]))
                 nfile_s = str(sum(s1-s0 for s0, s1 in segmentlist)/dur)
                 text.append(' '.join((key_s, mtime_s, nfile_s, sl_s)))
+            gc.enable()
         text.sort()
         fh.write('\n'.join(text))
         fh.write('\n')

@@ -7,7 +7,7 @@ import os
 # common paths across platforms
 # version must be set as a string
 # other scripts look for """'version' = """ in this file.
-version = "1.0.1" 
+version = "1.0.2" 
 path_dir_list = [ "/usr/share/man/man8",]
                   
 

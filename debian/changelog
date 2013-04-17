@@ -1,3 +1,9 @@
+python-pmdc (1.0.2) UNRELEASED; urgency=low
+
+  * optimize by disabling gc during write of ldas
+
+ -- Jeffery Kline <jeffery.kline@gmail.com>  Wed, 17 Apr 2013 16:21:59 -0500
+
 python-pmdc (1.0.1) UNRELEASED; urgency=low
 
   * initial addition of dcfs protocol

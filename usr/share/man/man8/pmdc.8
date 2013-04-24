@@ -158,13 +158,20 @@ The job executed by cron at UWM follows.
 #!/bin/sh
 set -e
 BIN=/usr/sbin/pmdc
-DIR=/var/lib/dc
-BASENAME=${DIR}/pmdc
+DIR=/var/lib/pmdc
+BASENAME=${DIR}/disk_state
 CACHE=${BASENAME}.cache
 MOUNT_POINTS=`ls -d /nfsdata/x4500-[3-9]/  /nfsdata/x4500-1[0-9]`
-OPTS="--concurrency 11 -e gwf -e sft -p ldas -o ${BASENAME}.txt"
+TEMPDIR=/dev/shm
+OPTS="--concurrency 11 -e gwf -e sft -p ldas -o ${BASENAME}.ldas -t ${TEMPDIR}"
 
 ${BIN} ${CACHE} ${MOUNT_POINTS} ${OPTS}
+.EE
+.RE
+The crontab file is
+.RS
+.EX
+*/10       *       *       *       *       /var/lib/pmdc/pmdc.sh 2>/dev/null
 .EE
 .RE
 .
@@ -172,13 +179,11 @@ ${BIN} ${CACHE} ${MOUNT_POINTS} ${OPTS}
 .SH FILES
 .P
 .TP
-.B /var/lib/dc 
+.B /var/lib/pmdc 
 This is the strongly-suggested location for cache files.
-.
 .
 .SH BUGS
 None known.
-.
 .
 .SH AUTHOR
 Jeffery Kline (jeffery.kline@gravity.phys.uwm.edu)
